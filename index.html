@@ -1367,11 +1367,20 @@ ${JSON.stringify(weekEntries.map(e => ({
       reply = data.choices?.[0]?.message?.content || JSON.stringify(data);
     }
 
-    $('insights-list').innerHTML = `<div class="insight-item good" style="white-space:pre-wrap;font-size:0.9rem;line-height:1.7">🤖 <strong>AI 深度分析</strong>\n\n${reply}</div>`;
+    // 安全渲染：用 textContent 避免 AI 回复中的 HTML/脚本注入
+    const aiDiv = document.createElement('div');
+    aiDiv.className = 'insight-item good';
+    aiDiv.style.cssText = 'white-space:pre-wrap;font-size:0.9rem;line-height:1.7';
+    aiDiv.textContent = '🤖 AI 深度分析\n\n' + reply;
+    $('insights-list').innerHTML = '';
+    $('insights-list').appendChild(aiDiv);
     showToast('✅ AI 分析完成');
   } catch(err) {
     showToast('AI 调用失败: ' + err.message, 'error');
-    $('insights-list').innerHTML = '<div class="insight-item warn">AI 调用失败，请检查网络和 API Key。以下是规则引擎分析：</div>' + $('insights-list').innerHTML;
+    const errDiv = document.createElement('div');
+    errDiv.className = 'insight-item warn';
+    errDiv.textContent = 'AI 调用失败，请检查网络和 API Key。';
+    $('insights-list').prepend(errDiv);
   }
   btn.disabled = false; btn.textContent = '🤖 AI 深度分析';
 }
@@ -1694,6 +1703,25 @@ async function connectFirebase() {
     firestore = window.firebase.firestore();
     firebaseDocRef = firestore.collection('growth_tracker').doc('shared');
 
+    // ---- 远程数据校验 ----
+    function isValidPayload(payload) {
+      if (!payload || typeof payload !== 'object') return false;
+      if (!Array.isArray(payload.entries)) return false;
+      if (!Array.isArray(payload.domains)) return false;
+      // 校验每条 entry 的基本结构
+      for (const e of payload.entries) {
+        if (!e.id || !e.title || !e.createdAt) return false;
+        if (typeof e.title !== 'string' || e.title.length > 500) return false;
+        if (e.content && typeof e.content !== 'string') return false;
+      }
+      // 校验 domain 结构
+      for (const d of payload.domains) {
+        if (!d.id || !d.name) return false;
+        if (typeof d.name !== 'string' || d.name.length > 100) return false;
+      }
+      return true;
+    }
+
     // 监听远程更新
     firebaseUnsub = firebaseDocRef.onSnapshot(
       doc => {
@@ -1707,6 +1735,12 @@ async function connectFirebase() {
           const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
           const localTs = saved?.settings?._lastSyncedAt || 0;
           if (remoteTs <= localTs) return; // 本地也更新了，不覆盖
+
+          if (!isValidPayload(remote.payload)) {
+            console.warn('远程 payload 结构校验失败，已忽略');
+            updateSyncStatus('同步异常·远程数据不可信', '#c4656b');
+            return;
+          }
 
           APP_DATA = remote.payload;
           localStorage.setItem(STORAGE_KEY, JSON.stringify(APP_DATA));
