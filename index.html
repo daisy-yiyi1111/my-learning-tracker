@@ -488,14 +488,15 @@ select {
       <!-- Firebase 实时同步 设置 -->
       <div class="setting-row" style="flex-direction:column;align-items:flex-start;gap:8px;padding-bottom:12px">
         <div>
-          <div class="setting-label">Firebase 实时同步</div>
-          <div class="setting-desc">将数据实时同步到 Firebase Firestore，实现多设备间实时更新。配置后点击连接即可在手机与电脑间共享数据。</div>
+          <div class="setting-label">☁️ Firebase 实时同步</div>
+          <div class="setting-desc">多设备间自动同步。断网/梯子掉了也不影响使用，数据照常存本地，网络恢复自动补传。</div>
         </div>
-        <textarea id="firebase-config" placeholder="在 Firebase 控制台 → 项目设置 → SDK 配置 (将 firebaseConfig 对象以 JSON 粘贴到此处)" style="width:100%;min-height:80px;font-size:0.85rem"></textarea>
-        <div style="display:flex;gap:8px;align-items:center">
+        <textarea id="firebase-config" placeholder="在 Firebase 控制台 → 项目设置 → SDK 配置 (将 firebaseConfig 对象以 JSON 粘贴到此处)" style="width:100%;min-height:80px;font-size:0.85rem" onchange="saveFirebaseConfig()"></textarea>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           <button class="btn btn-primary btn-sm" id="btn-firebase-connect" onclick="toggleFirebaseConnect()">连接 Firebase</button>
-          <button class="btn btn-secondary btn-sm" onclick="showFirebaseInstructions()">查看配置说明</button>
-          <span id="firebase-status" style="color:var(--muted);font-size:0.9rem;margin-left:8px">未连接</span>
+          <button class="btn btn-secondary btn-sm" onclick="showFirebaseInstructions()">📋 配置说明</button>
+          <span id="firebase-status" style="font-size:0.88rem;margin-left:4px">未连接</span>
+          <span id="firebase-queue-hint" style="font-size:0.78rem;color:var(--muted);display:none"></span>
         </div>
       </div>
 
@@ -1450,6 +1451,12 @@ function loadSettingsUI() {
   $('setting-ai-provider').value = s.aiProvider || 'none';
   $('setting-api-key').value = s.aiApiKey || '';
   toggleApiKeyRow();
+  // 加载已保存的 Firebase 配置
+  if (s.firebaseConfig) {
+    $('firebase-config').value = s.firebaseConfig;
+  }
+  // 更新离线队列提示
+  updateQueueHint();
 }
 
 function toggleApiKeyRow() {
@@ -1464,6 +1471,28 @@ function saveSettings() {
   APP_DATA.settings.aiApiKey = $('setting-api-key').value.trim();
   saveData(APP_DATA);
   updateAiButton();
+}
+
+function saveFirebaseConfig() {
+  const val = $('firebase-config').value.trim();
+  APP_DATA.settings.firebaseConfig = val;
+  saveData(APP_DATA);
+  if (val && !firebaseConnected) {
+    updateSyncStatus('已保存配置·点击连接', '#d4a853');
+  }
+}
+
+function updateQueueHint() {
+  const hint = $('firebase-queue-hint');
+  if (!hint) return;
+  const q = getOfflineQueue();
+  if (q.length > 0) {
+    hint.style.display = 'inline';
+    hint.textContent = `📤 ${q.length} 条待同步`;
+    hint.style.color = '#d4a853';
+  } else {
+    hint.style.display = 'none';
+  }
 }
 
 function exportData() {
@@ -1568,36 +1597,81 @@ function calcStreak() {
 }
 
 // ============================================================
-// FIREBASE / REALTIME SYNC (optional)
+// FIREBASE / REALTIME SYNC（可选，网络不好时自动降级）
 // ============================================================
 
-// Lightweight Firebase loader (compat) — will be loaded only when user connects
 let firebaseApp = null;
 let firestore = null;
 let firebaseUnsub = null;
 let firebaseConnected = false;
 let firebaseDocRef = null;
-let lastRemoteUpdatedAt = 0;
+let firebaseSyncing = false;       // 正在上传中
+let firebaseCfgObj = null;         // 缓存的配置，用于自动重连
+let _uploadTimer = null;
+let _retryTimer = null;
+const OFFLINE_QUEUE_KEY = 'growth_tracker_offline_queue';
 
-function showFirebaseInstructions() {
-  alert('使用说明：\n1) 在 https://console.firebase.google.com 中创建项目并启用 Firestore（非Realtime DB）。\n2) 在项目设置 → SDK 配置 中复制 firebaseConfig 对象（示例：{apiKey:"...", authDomain:"...", projectId:"...", ...}），将其完整 JSON 粘贴到配置框。\n3) 点击连接 Firebase。\n4) 连接后会在 Firestore 中创建文档 growth_tracker/shared（可在控制台查看）。\n\n注意：这是示例同步实现，数据会覆盖合并策略为“以最近更新为准”。');
+// ---- 离线队列：断网时的修改暂存，联网后自动补传 ----
+function getOfflineQueue() {
+  try { return JSON.parse(localStorage.getItem(OFFLINE_QUEUE_KEY)) || []; }
+  catch(e) { return []; }
+}
+function addToOfflineQueue() {
+  const q = getOfflineQueue();
+  q.push(Date.now());
+  // 去重：只保留最近 5 条待同步标记
+  const trimmed = q.slice(-5);
+  localStorage.setItem(OFFLINE_QUEUE_KEY, JSON.stringify(trimmed));
+}
+function clearOfflineQueue() {
+  localStorage.removeItem(OFFLINE_QUEUE_KEY);
 }
 
-async function loadFirebaseSDK() {
-  if (window.firebase && window.firebase.firestore) return;
-  // load compat SDKs
-  await new Promise((res, rej) => {
+// ---- 状态显示更新 ----
+function updateSyncStatus(text, color) {
+  const el = document.getElementById('firebase-status');
+  if (el) { el.textContent = text; el.style.color = color || 'var(--muted)'; }
+  const mobile = document.getElementById('mobile-sync-status');
+  if (mobile) { mobile.textContent = text; mobile.style.color = color || 'var(--muted)'; }
+  updateQueueHint();
+}
+
+function showFirebaseInstructions() {
+  alert('📋 Firebase 配置步骤：\n\n' +
+    '1. 打开 https://console.firebase.google.com（需梯子）\n' +
+    '2. 创建项目 → 启用 Firestore Database（选”测试模式”）\n' +
+    '3. 项目设置 → 常规 → 您的应用 → 点击 </> 图标\n' +
+    '4. 复制 firebaseConfig 对象（花括号 { } 全部复制）\n' +
+    '5. 粘贴到下方配置框，点击”连接 Firebase”\n\n' +
+    '💡 提示：\n' +
+    '- Firebase SDK 国内可能加载较慢，请耐心等待\n' +
+    '- 连不上不影响使用，数据照常存本地\n' +
+    '- 配置只需做一次，两台设备填相同的 firebaseConfig');
+}
+
+// ---- SDK 加载（带超时） ----
+function loadFirebaseSDK() {
+  if (window.firebase && window.firebase.firestore) return Promise.resolve();
+  return new Promise((res, rej) => {
+    const timeout = setTimeout(() => {
+      rej(new Error('SDK 加载超时（gstatic.com 不可达，可能需要梯子）'));
+    }, 15000);
+
     const s1 = document.createElement('script');
     s1.src = 'https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js';
     s1.onload = () => {
       const s2 = document.createElement('script');
       s2.src = 'https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js';
-      s2.onload = res; s2.onerror = rej; document.head.appendChild(s2);
+      s2.onload = () => { clearTimeout(timeout); res(); };
+      s2.onerror = () => { clearTimeout(timeout); rej(new Error('Firestore SDK 加载失败')); };
+      document.head.appendChild(s2);
     };
-    s1.onerror = rej; document.head.appendChild(s1);
+    s1.onerror = () => { clearTimeout(timeout); rej(new Error('Firebase App SDK 加载失败（gstatic.com 不可达）')); };
+    document.head.appendChild(s1);
   });
 }
 
+// ---- 连接 / 断开 ----
 async function toggleFirebaseConnect() {
   if (firebaseConnected) { disconnectFirebase(); }
   else { await connectFirebase(); }
@@ -1609,72 +1683,168 @@ async function connectFirebase() {
   let cfg = null;
   try { cfg = JSON.parse(raw); } catch(e) { showToast('JSON 格式不正确', 'error'); return; }
 
+  updateSyncStatus('连接中...', '#d4a853');
+  document.getElementById('btn-firebase-connect').textContent = '⏳ 连接中...';
+  document.getElementById('btn-firebase-connect').disabled = true;
+
   try {
     await loadFirebaseSDK();
     if (!firebaseApp) firebaseApp = window.firebase.initializeApp(cfg);
+    firebaseCfgObj = cfg;
     firestore = window.firebase.firestore();
-    // reference to shared doc
     firebaseDocRef = firestore.collection('growth_tracker').doc('shared');
 
-    // listen for remote updates
-    firebaseUnsub = firebaseDocRef.onSnapshot(doc => {
-      if (!doc.exists) return;
-      const remote = doc.data();
-      if (!remote || !remote.lastUpdated) return;
-      const remoteTs = remote.lastUpdated;
-      if (remoteTs <= (APP_DATA.settings._lastSyncedAt || 0)) return; // ignore older or equal
-      // apply remote data
-      if (confirm('检测到远程设备更新数据，是否用远程数据覆盖本地？(按确认将覆盖本地)')) {
+    // 监听远程更新
+    firebaseUnsub = firebaseDocRef.onSnapshot(
+      doc => {
+        if (!doc.exists) return;
+        const remote = doc.data();
+        if (!remote || !remote.lastUpdated) return;
+        const remoteTs = remote.lastUpdated;
+        if (remoteTs <= (APP_DATA.settings._lastSyncedAt || 0)) return;
+        // 远程更新更晚，自动合并（保留本地更新的时间戳判断）
         try {
-          APP_DATA = remote.payload;
-          saveData(APP_DATA);
-          reloadData();
-          renderTodayList(); renderHistory(); renderDomainManager(); renderDashboard();
-          showToast('已应用远程数据');
-          APP_DATA.settings._lastSyncedAt = remoteTs;
-        } catch(e) { console.error(e); }
-      }
-    });
+          const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
+          const localTs = saved?.settings?._lastSyncedAt || 0;
+          if (remoteTs <= localTs) return; // 本地也更新了，不覆盖
 
-    firebaseConnected = true; document.getElementById('btn-firebase-connect').textContent = '断开 Firebase';
-    document.getElementById('firebase-status').textContent = '已连接';
-    // upload current data once
-    scheduleUploadToFirestore(true);
+          APP_DATA = remote.payload;
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(APP_DATA));
+          APP_DATA.settings._lastSyncedAt = remoteTs;
+          renderTodayList(); renderHistory(); renderDomainManager();
+          if (document.getElementById('page-dashboard').classList.contains('active')) renderDashboard();
+          updateSyncStatus('已同步', '#6b9e7a');
+          showToast('📥 已从另一设备同步最新数据');
+        } catch(e) { console.error('远程同步应用失败:', e); }
+      },
+      err => {
+        console.warn('Firebase 监听出错:', err);
+        updateSyncStatus('监听断开·重试中', '#c4656b');
+        scheduleRetry();
+      }
+    );
+
+    firebaseConnected = true;
+    updateSyncStatus('已连接', '#6b9e7a');
+    document.getElementById('btn-firebase-connect').textContent = '断开 Firebase';
+    document.getElementById('btn-firebase-connect').disabled = false;
+
+    // 检查离线队列
+    const q = getOfflineQueue();
+    if (q.length > 0) {
+      showToast(`📤 正在同步 ${q.length} 条离线记录...`);
+    }
+
+    // 首次上传
+    await uploadToFirestore(true);
+
   } catch(err) {
-    console.error(err); showToast('连接 Firebase 失败：' + err.message, 'error');
+    console.error('Firebase 连接失败:', err);
+    updateSyncStatus('未连接(' + err.message.substring(0,20) + ')', '#c4656b');
+    document.getElementById('btn-firebase-connect').textContent = '连接 Firebase';
+    document.getElementById('btn-firebase-connect').disabled = false;
+    showToast('⚠️ Firebase 连接失败，使用本地存储', 'error');
+    // 不清除 firebaseCfgObj，等网络好了自动重连
   }
 }
 
 function disconnectFirebase() {
+  if (_retryTimer) { clearTimeout(_retryTimer); _retryTimer = null; }
   if (firebaseUnsub) { try { firebaseUnsub(); } catch(e){} firebaseUnsub = null; }
-  firebaseConnected = false; firebaseDocRef = null; document.getElementById('btn-firebase-connect').textContent = '连接 Firebase';
-  document.getElementById('firebase-status').textContent = '未连接';
-  showToast('已断开 Firebase');
+  firebaseConnected = false;
+  firebaseDocRef = null;
+  firebaseCfgObj = null;
+  document.getElementById('btn-firebase-connect').textContent = '连接 Firebase';
+  document.getElementById('btn-firebase-connect').disabled = false;
+  updateSyncStatus('未连接', 'var(--muted)');
+  showToast('已断开 Firebase，使用本地存储');
 }
 
-let _uploadTimer = null;
+// ---- 上传（带去抖 + 离线队列） ----
+async function uploadToFirestore(force) {
+  if (!firebaseConnected || !firebaseDocRef || firebaseSyncing) return;
+  firebaseSyncing = true;
+  try {
+    const payload = JSON.parse(JSON.stringify(APP_DATA)); // 深拷贝
+    const ts = Date.now();
+    await firebaseDocRef.set({ lastUpdated: ts, payload }, { merge: true });
+    APP_DATA.settings._lastSyncedAt = ts;
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(APP_DATA));
+    clearOfflineQueue();
+    updateSyncStatus('已同步', '#6b9e7a');
+  } catch(e) {
+    console.error('上传失败:', e);
+    addToOfflineQueue();
+    updateSyncStatus('同步失败·待重试', '#d4a853');
+  }
+  firebaseSyncing = false;
+}
+
 function scheduleUploadToFirestore(force) {
   if (!firebaseConnected || !firebaseDocRef) return;
-  // debounce
   if (_uploadTimer) clearTimeout(_uploadTimer);
-  _uploadTimer = setTimeout(async () => {
-    try {
-      const payload = APP_DATA;
-      const ts = Date.now();
-      await firebaseDocRef.set({ lastUpdated: ts, payload }, { merge: true });
-      APP_DATA.settings._lastSyncedAt = ts;
-      saveData(APP_DATA);
-      showToast('已同步到 Firebase');
-    } catch(e) { console.error(e); showToast('同步失败: ' + e.message, 'error'); }
-  }, force ? 50 : 800);
+  _uploadTimer = setTimeout(() => uploadToFirestore(force), force ? 50 : 1000);
 }
 
-// Integrate with local save: wrap saveData to trigger upload when connected
+// ---- 自动重连 ----
+function scheduleRetry() {
+  if (_retryTimer) return;
+  if (!firebaseCfgObj) return; // 没配置过，不重试
+
+  updateSyncStatus('待重连...', '#d4a853');
+  _retryTimer = setTimeout(async () => {
+    _retryTimer = null;
+    if (firebaseConnected) return; // 已经连上了
+    try {
+      await loadFirebaseSDK();
+      if (!firebaseApp && firebaseCfgObj) {
+        firebaseApp = window.firebase.initializeApp(firebaseCfgObj);
+      }
+      firestore = window.firebase.firestore();
+      firebaseDocRef = firestore.collection('growth_tracker').doc('shared');
+      firebaseConnected = true;
+      updateSyncStatus('已重连', '#6b9e7a');
+      document.getElementById('btn-firebase-connect').textContent = '断开 Firebase';
+      // 补传离线数据
+      const q = getOfflineQueue();
+      if (q.length > 0) showToast(`📤 正在补传 ${q.length} 条离线记录...`);
+      await uploadToFirestore(true);
+    } catch(e) {
+      console.warn('自动重连失败，60秒后重试');
+      scheduleRetry(); // 继续重试
+    }
+  }, 60000); // 60秒后重试
+}
+
+// ---- 网络状态监听 ----
+window.addEventListener('online', () => {
+  if (firebaseCfgObj && !firebaseConnected) {
+    updateSyncStatus('网络恢复·重连中', '#d4a853');
+    _retryTimer && clearTimeout(_retryTimer);
+    _retryTimer = null;
+    scheduleRetry();
+  }
+});
+window.addEventListener('offline', () => {
+  if (firebaseConnected) {
+    updateSyncStatus('已离线', '#d4a853');
+  }
+});
+
+// ---- 集成 saveData：本地保存 + 触发云端同步 ----
 function initFirebaseIntegration() {
   const originalSave = saveData;
   saveData = function(data) {
     originalSave(data);
-    try { if (firebaseConnected) scheduleUploadToFirestore(); } catch(e){}
+    try {
+      if (firebaseConnected && firebaseDocRef) {
+        scheduleUploadToFirestore();
+      } else if (firebaseCfgObj) {
+        // 配置过但没连上，标记离线队列等重连
+        addToOfflineQueue();
+        scheduleRetry();
+      }
+    } catch(e){}
   };
 }
 
