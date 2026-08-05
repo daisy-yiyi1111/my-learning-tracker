@@ -2,8 +2,18 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>📊 我的学习追踪</title>
+
+<!-- PWA Meta -->
+<meta name="theme-color" content="#5b8c9e">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="学习追踪">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" type="image/svg+xml" href="icon-192.svg">
+<link rel="apple-touch-icon" href="icon-192.svg">
+
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <style>
 /* ===== CSS Variables & Reset ===== */
@@ -321,6 +331,21 @@ select {
   .kpi-row { grid-template-columns: repeat(2, 1fr); }
   .charts-row { grid-template-columns: 1fr; }
 }
+
+/* Mobile: hide side nav by default, show topbar with hamburger */
+@media (max-width: 600px) {
+  .sidebar { position: fixed; top: 0; left: -260px; width: 240px; height: 100%; padding-top: 60px; transition: left 0.25s; }
+  body.sidebar-open .sidebar { left: 0; }
+  .mobile-topbar { display: flex; position: fixed; top: 0; left: 0; right: 0; height: 52px; background: var(--card); align-items: center; gap: 12px; padding: 0 12px; border-bottom: 1px solid var(--border); z-index: 20; }
+  .mobile-topbar .hamburger { font-size: 1.2rem; padding: 8px; border-radius: 8px; cursor: pointer; }
+  .main { margin-left: 0; padding: 72px 16px 20px; }
+  .sidebar-logo::before { display: none; }
+  .nav-item span { display: inline-block; }
+  .nav-item { justify-content: flex-start; padding: 12px 18px; }
+}
+
+/* Ensure charts scale nicely on small screens */
+.chart-box canvas { width: 100% !important; height: auto !important; max-height: 360px; }
 </style>
 </head>
 <body>
@@ -459,6 +484,21 @@ select {
         <div><div class="setting-label">API Key</div><div class="setting-desc">仅存储在本机浏览器中</div></div>
         <input type="text" id="setting-api-key" placeholder="sk-..." style="width:300px" onchange="saveSettings()">
       </div>
+
+      <!-- Firebase 实时同步 设置 -->
+      <div class="setting-row" style="flex-direction:column;align-items:flex-start;gap:8px;padding-bottom:12px">
+        <div>
+          <div class="setting-label">Firebase 实时同步</div>
+          <div class="setting-desc">将数据实时同步到 Firebase Firestore，实现多设备间实时更新。配置后点击连接即可在手机与电脑间共享数据。</div>
+        </div>
+        <textarea id="firebase-config" placeholder="在 Firebase 控制台 → 项目设置 → SDK 配置 (将 firebaseConfig 对象以 JSON 粘贴到此处)" style="width:100%;min-height:80px;font-size:0.85rem"></textarea>
+        <div style="display:flex;gap:8px;align-items:center">
+          <button class="btn btn-primary btn-sm" id="btn-firebase-connect" onclick="toggleFirebaseConnect()">连接 Firebase</button>
+          <button class="btn btn-secondary btn-sm" onclick="showFirebaseInstructions()">查看配置说明</button>
+          <span id="firebase-status" style="color:var(--muted);font-size:0.9rem;margin-left:8px">未连接</span>
+        </div>
+      </div>
+
       <div class="setting-row">
         <div><div class="setting-label">JSON 导出备份</div><div class="setting-desc">下载全部数据为 JSON 文件</div></div>
         <button class="btn btn-secondary btn-sm" onclick="exportData()">📥 导出</button>
@@ -1528,6 +1568,117 @@ function calcStreak() {
 }
 
 // ============================================================
+// FIREBASE / REALTIME SYNC (optional)
+// ============================================================
+
+// Lightweight Firebase loader (compat) — will be loaded only when user connects
+let firebaseApp = null;
+let firestore = null;
+let firebaseUnsub = null;
+let firebaseConnected = false;
+let firebaseDocRef = null;
+let lastRemoteUpdatedAt = 0;
+
+function showFirebaseInstructions() {
+  alert('使用说明：\n1) 在 https://console.firebase.google.com 中创建项目并启用 Firestore（非Realtime DB）。\n2) 在项目设置 → SDK 配置 中复制 firebaseConfig 对象（示例：{apiKey:"...", authDomain:"...", projectId:"...", ...}），将其完整 JSON 粘贴到配置框。\n3) 点击连接 Firebase。\n4) 连接后会在 Firestore 中创建文档 growth_tracker/shared（可在控制台查看）。\n\n注意：这是示例同步实现，数据会覆盖合并策略为“以最近更新为准”。');
+}
+
+async function loadFirebaseSDK() {
+  if (window.firebase && window.firebase.firestore) return;
+  // load compat SDKs
+  await new Promise((res, rej) => {
+    const s1 = document.createElement('script');
+    s1.src = 'https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js';
+    s1.onload = () => {
+      const s2 = document.createElement('script');
+      s2.src = 'https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js';
+      s2.onload = res; s2.onerror = rej; document.head.appendChild(s2);
+    };
+    s1.onerror = rej; document.head.appendChild(s1);
+  });
+}
+
+async function toggleFirebaseConnect() {
+  if (firebaseConnected) { disconnectFirebase(); }
+  else { await connectFirebase(); }
+}
+
+async function connectFirebase() {
+  const raw = document.getElementById('firebase-config').value.trim();
+  if (!raw) { showToast('请先在配置框粘贴 firebaseConfig JSON', 'error'); return; }
+  let cfg = null;
+  try { cfg = JSON.parse(raw); } catch(e) { showToast('JSON 格式不正确', 'error'); return; }
+
+  try {
+    await loadFirebaseSDK();
+    if (!firebaseApp) firebaseApp = window.firebase.initializeApp(cfg);
+    firestore = window.firebase.firestore();
+    // reference to shared doc
+    firebaseDocRef = firestore.collection('growth_tracker').doc('shared');
+
+    // listen for remote updates
+    firebaseUnsub = firebaseDocRef.onSnapshot(doc => {
+      if (!doc.exists) return;
+      const remote = doc.data();
+      if (!remote || !remote.lastUpdated) return;
+      const remoteTs = remote.lastUpdated;
+      if (remoteTs <= (APP_DATA.settings._lastSyncedAt || 0)) return; // ignore older or equal
+      // apply remote data
+      if (confirm('检测到远程设备更新数据，是否用远程数据覆盖本地？(按确认将覆盖本地)')) {
+        try {
+          APP_DATA = remote.payload;
+          saveData(APP_DATA);
+          reloadData();
+          renderTodayList(); renderHistory(); renderDomainManager(); renderDashboard();
+          showToast('已应用远程数据');
+          APP_DATA.settings._lastSyncedAt = remoteTs;
+        } catch(e) { console.error(e); }
+      }
+    });
+
+    firebaseConnected = true; document.getElementById('btn-firebase-connect').textContent = '断开 Firebase';
+    document.getElementById('firebase-status').textContent = '已连接';
+    // upload current data once
+    scheduleUploadToFirestore(true);
+  } catch(err) {
+    console.error(err); showToast('连接 Firebase 失败：' + err.message, 'error');
+  }
+}
+
+function disconnectFirebase() {
+  if (firebaseUnsub) { try { firebaseUnsub(); } catch(e){} firebaseUnsub = null; }
+  firebaseConnected = false; firebaseDocRef = null; document.getElementById('btn-firebase-connect').textContent = '连接 Firebase';
+  document.getElementById('firebase-status').textContent = '未连接';
+  showToast('已断开 Firebase');
+}
+
+let _uploadTimer = null;
+function scheduleUploadToFirestore(force) {
+  if (!firebaseConnected || !firebaseDocRef) return;
+  // debounce
+  if (_uploadTimer) clearTimeout(_uploadTimer);
+  _uploadTimer = setTimeout(async () => {
+    try {
+      const payload = APP_DATA;
+      const ts = Date.now();
+      await firebaseDocRef.set({ lastUpdated: ts, payload }, { merge: true });
+      APP_DATA.settings._lastSyncedAt = ts;
+      saveData(APP_DATA);
+      showToast('已同步到 Firebase');
+    } catch(e) { console.error(e); showToast('同步失败: ' + e.message, 'error'); }
+  }, force ? 50 : 800);
+}
+
+// Integrate with local save: wrap saveData to trigger upload when connected
+function initFirebaseIntegration() {
+  const originalSave = saveData;
+  saveData = function(data) {
+    originalSave(data);
+    try { if (firebaseConnected) scheduleUploadToFirestore(); } catch(e){}
+  };
+}
+
+// ============================================================
 // INIT
 // ============================================================
 document.addEventListener('DOMContentLoaded', () => {
@@ -1553,6 +1704,55 @@ document.addEventListener('keydown', function(e) {
   }
   if (e.key === 'Escape') closeEditModal();
 });
+
+// initialize firebase integration wrapper
+initFirebaseIntegration();
+
+// add mobile topbar for small screens
+(function addMobileTopbar(){
+  const bar = document.createElement('div');
+  bar.className = 'mobile-topbar';
+  bar.innerHTML = `<div class="hamburger" onclick="toggleSidebar()">☰</div><div style="font-weight:700">📊 学习追踪</div><div style="flex:1"></div><div style="font-size:0.95rem;color:var(--muted)" id="mobile-sync-status">离线</div>`;
+  document.body.insertBefore(bar, document.body.firstChild);
+})();
+
+// Mobile sidebar toggle
+function toggleSidebar() {
+  document.body.classList.toggle('sidebar-open');
+  // Add/remove overlay
+  let overlay = document.getElementById('sidebar-overlay');
+  if (!overlay && document.body.classList.contains('sidebar-open')) {
+    overlay = document.createElement('div');
+    overlay.id = 'sidebar-overlay';
+    overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.3);z-index:9';
+    overlay.addEventListener('click', toggleSidebar);
+    document.body.appendChild(overlay);
+  } else if (overlay && !document.body.classList.contains('sidebar-open')) {
+    overlay.remove();
+  }
+}
+
+// Close sidebar when a nav item is clicked (mobile)
+document.querySelectorAll('.nav-item').forEach(btn => {
+  btn.addEventListener('click', function() {
+    if (document.body.classList.contains('sidebar-open')) {
+      toggleSidebar();
+    }
+  });
+});
+
+// Register Service Worker for PWA
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('./sw.js').then(reg => {
+      console.log('SW registered:', reg.scope);
+      document.getElementById('mobile-sync-status') && (document.getElementById('mobile-sync-status').textContent = 'PWA✓');
+    }).catch(err => {
+      console.warn('SW registration failed:', err);
+    });
+  });
+}
+
 </script>
 </body>
 </html>
