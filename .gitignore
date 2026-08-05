@@ -1,0 +1,13 @@
+# Claude Code config (contains API keys)
+.claude/
+
+# AI vision temp files
+.ai/
+
+# Tools (contain API keys, large exports)
+tools/
+
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
