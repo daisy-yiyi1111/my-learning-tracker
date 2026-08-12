@@ -392,6 +392,11 @@ select {
             <span class="mood-star" data-mood="4">😊</span>
             <span class="mood-star" data-mood="5">🤩</span>
           </div>
+          <div style="display:flex;align-items:center;gap:6px;margin-top:4px">
+            <span style="font-size:0.85rem;color:var(--text2)">📅</span>
+            <input type="date" id="record-date" style="width:150px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:0.85rem;color:var(--text);background:var(--bg);font-family:var(--font)">
+            <span style="font-size:0.75rem;color:var(--muted)">可补录过往日期</span>
+          </div>
         </div>
         <div class="record-actions">
           <button class="btn btn-secondary" id="btn-expand" onclick="toggleRecordMeta()">+ 详细记录</button>
@@ -466,11 +471,21 @@ select {
   <section class="page" id="page-settings">
     <div class="page-title"><span class="emoji">⚙️</span>设置</div>
     <div class="card">
+      <!-- 使用模式 -->
+      <div class="setting-row" style="background:var(--accent-light);border-radius:10px;padding:14px 16px;margin-bottom:4px">
+        <div><div class="setting-label">🎯 使用模式</div><div class="setting-desc" id="mode-desc">访客模式：数据存本机，AI每天20次</div></div>
+        <div style="display:flex;gap:6px">
+          <button class="btn btn-sm" id="btn-mode-guest" onclick="switchMode('guest')" style="border-radius:8px 0 0 8px">🧑‍🤝‍🧑 访客</button>
+          <button class="btn btn-sm" id="btn-mode-personal" onclick="switchMode('personal')" style="border-radius:0 8px 8px 0">🔐 个人</button>
+        </div>
+      </div>
       <div class="setting-row">
         <div><div class="setting-label">每日学习目标</div><div class="setting-desc">用于仪表盘目标线对比</div></div>
         <input type="number" id="setting-goal" value="180" min="30" max="600" style="width:100px" onchange="saveSettings()">
         <span>分钟</span>
       </div>
+      <!-- 以下为个人模式专属设置 -->
+      <div id="personal-only-settings">
       <div class="setting-row">
         <div><div class="setting-label">AI 服务商</div><div class="setting-desc">用于深度分析（可选）</div></div>
         <select id="setting-ai-provider" style="width:180px" onchange="saveSettings()">
@@ -498,6 +513,14 @@ select {
           <span id="firebase-status" style="font-size:0.88rem;margin-left:4px">未连接</span>
           <span id="firebase-queue-hint" style="font-size:0.78rem;color:var(--muted);display:none"></span>
         </div>
+      </div>
+      </div>
+      <!-- 个人模式专属设置结束 -->
+
+      <!-- 访客模式：AI 状态显示 -->
+      <div class="setting-row" id="guest-ai-status" style="display:none">
+        <div><div class="setting-label">🤖 公共 AI 分析</div><div class="setting-desc" id="guest-ai-desc">每天20次免费额度，由系统提供</div></div>
+        <span style="font-size:0.9rem;color:var(--accent);font-weight:600" id="guest-ai-remaining">今日剩余 20 次</span>
       </div>
 
       <div class="setting-row">
@@ -535,6 +558,10 @@ select {
         <input type="text" id="edit-tags" placeholder="标签" style="width:200px">
       </div>
       <div>😶 <span id="edit-mood-stars"></span></div>
+      <div style="display:flex;align-items:center;gap:6px">
+        <span style="font-size:0.85rem;color:var(--text2)">📅 日期</span>
+        <input type="date" id="edit-date" style="width:150px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:0.85rem;color:var(--text);background:var(--bg);font-family:var(--font)">
+      </div>
     </div>
     <div class="modal-actions">
       <button class="btn btn-secondary" onclick="closeEditModal()">取消</button>
@@ -602,11 +629,18 @@ function initData() {
         dailyGoalMinutes: 180,
         aiProvider: 'none',
         aiApiKey: '',
+        mode: 'guest',        // 'guest' | 'personal'
       }
     };
     saveData(data);
   }
-  // migration
+  // migration: 老用户有 Firebase 或 API Key 配置 → 自动设为个人模式
+  if (!data.settings.mode) {
+    const hasFirebase = !!(data.settings.firebaseConfig);
+    const hasApiKey = !!(data.settings.aiApiKey && data.settings.aiProvider !== 'none');
+    data.settings.mode = (hasFirebase || hasApiKey) ? 'personal' : 'guest';
+  }
+  // legacy migration
   if (data.version === 1 && !data.settings.hasOwnProperty('dailyGoalMinutes')) {
     data.settings.dailyGoalMinutes = 180;
     data.settings.aiProvider = 'none';
@@ -688,7 +722,13 @@ function toggleRecordMeta() {
   recordMetaExpanded = !recordMetaExpanded;
   $('record-meta').style.display = recordMetaExpanded ? 'flex' : 'none';
   $('btn-expand').textContent = recordMetaExpanded ? '− 收起' : '+ 详细记录';
-  if (recordMetaExpanded) populateDomainSelect('record-domain');
+  if (recordMetaExpanded) {
+    populateDomainSelect('record-domain');
+    // 初始化日期选择器为今天
+    if (!$('record-date').value) {
+      $('record-date').value = new Date().toISOString().slice(0, 10);
+    }
+  }
 }
 
 function populateDomainSelect(selectId) {
@@ -820,6 +860,16 @@ function editClassify() {
   }
 }
 
+function getRecordDate() {
+  const dateVal = $('record-date').value;
+  if (dateVal) {
+    // Combine selected date with current time
+    const d = new Date(dateVal + 'T' + new Date().toTimeString().slice(0, 8));
+    return d.toISOString();
+  }
+  return new Date().toISOString();
+}
+
 function submitRecord() {
   const text = $('record-input').value.trim();
   if (!text) { showToast('请输入学习内容', 'error'); return; }
@@ -855,7 +905,7 @@ function submitRecord() {
     },
     mood: parseInt(document.getElementById('mood-stars').dataset.value) || null,
     energy: null,
-    createdAt: new Date().toISOString(),
+    createdAt: getRecordDate(),
     editedAt: null,
   };
 
@@ -867,6 +917,7 @@ function submitRecord() {
   $('record-duration').value = '';
   $('record-score').value = '';
   $('record-tags').value = '';
+  $('record-date').value = new Date().toISOString().slice(0, 10); // 重置为今天
   document.getElementById('mood-stars').dataset.value = '';
   document.querySelectorAll('#mood-stars .mood-star').forEach(s => s.classList.remove('active'));
   $('classify-result').classList.remove('show');
@@ -1006,6 +1057,9 @@ function openEditModal(entryId) {
   $('edit-mood-stars').innerHTML = mhtml;
   $('edit-modal-overlay').dataset.mood = e.mood || '';
 
+  // 回填日期
+  $('edit-date').value = e.createdAt ? new Date(e.createdAt).toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10);
+
   $('edit-modal-overlay').classList.add('show');
 }
 
@@ -1030,6 +1084,13 @@ function saveEdit() {
   e.tags = $('edit-tags').value.split(/[,，、\s]+/).filter(Boolean);
   const editMood = $('edit-modal-overlay').dataset.mood;
   e.mood = editMood ? parseInt(editMood) : null;
+  // 更新日期
+  const editDate = $('edit-date').value;
+  if (editDate) {
+    const oldTime = e.createdAt ? new Date(e.createdAt) : new Date();
+    const newDate = new Date(editDate + 'T' + oldTime.toTimeString().slice(0, 8));
+    e.createdAt = newDate.toISOString();
+  }
   e.editedAt = new Date().toISOString();
   saveData(APP_DATA);
   closeEditModal();
@@ -1255,14 +1316,27 @@ function renderInsights(entries) {
 function updateAiButton() {
   const btn = $('btn-ai-analyze');
   const s = APP_DATA.settings;
-  btn.disabled = !(s.aiProvider && s.aiProvider !== 'none' && s.aiApiKey);
+  const inGuest = getMode() === 'guest';
+  const hasPersonalKey = s.aiProvider && s.aiProvider !== 'none' && s.aiApiKey;
+  btn.disabled = !(inGuest || hasPersonalKey);
   btn.textContent = btn.disabled ? '🤖 AI 深度分析（需在设置中配置API Key）' : '🤖 AI 深度分析';
 }
 
 async function aiDeepAnalyze() {
   const s = APP_DATA.settings;
-  if (!s.aiApiKey || s.aiProvider === 'none') {
-    showToast('请先在设置中配置 AI API Key', 'error'); return;
+  const inGuest = getMode() === 'guest';
+
+  // 访客模式：检查每日额度
+  if (inGuest) {
+    const used = getGuestUsage();
+    if (used >= 20) {
+      showToast('今日公共 AI 额度已用完（20次/天）。明天自动恢复，或切换到个人模式。', 'error'); return;
+    }
+  } else {
+    // 个人模式：需要配置 API Key
+    if (!s.aiApiKey || s.aiProvider === 'none') {
+      showToast('请先在设置中配置 AI API Key', 'error'); return;
+    }
   }
 
   const now = new Date();
@@ -1311,10 +1385,23 @@ async function aiDeepAnalyze() {
       return d.min > 0 ? `${dStr}: ${Math.round(d.min/60)}h${d.min%60}m (${d.entries.join('; ')})` : `${dStr}: 无记录`;
     }).join('\n');
 
-    const prompt = `你是一位专业的学习教练，帮助用户分析学习数据并提供务实建议。用户是一位考研+考证+兴趣学习多线并行的学生。
+    // 动态计算用户背景（每个人的数据不同，首次使用日期是自动算的）
+    const sortedEntries = [...allEntries].sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+    const firstDate = sortedEntries.length > 0 ? new Date(sortedEntries[0].createdAt) : new Date();
+    const daysSinceFirst = Math.max(1, Math.ceil((now - firstDate) / (1000 * 60 * 60 * 24)));
+    const totalRecords = allEntries.length;
+    const isNewUser = totalRecords < 15;
+
+    const prompt = `你是一位敏锐且务实的学习教练。你的风格是：直接点出问题，不用客套话铺垫，但始终保持尊重——批评事不批评人，给方案不给情绪。
+
+用户是一位考研+考证+兴趣学习多线并行的学生。
+
+【用户背景·非常重要】
+- 该用户${isNewUser ? '刚刚开始使用本工具' : '已使用本工具一段时间'}：首次记录于${firstDate.getMonth()+1}月${firstDate.getDate()}日，至今仅${daysSinceFirst}天，历史总记录${totalRecords}条
+- ${isNewUser ? '用户是新手，记录数量少是正常的（因为工具才用没多久）。不要批评"记录不够多"或"之前没记录"，而应该肯定ta已经迈出了第一步，然后给出"如何从零建立记录和复习节奏"的务实建议。' : '用户已有一定记录基础，可以结合长期趋势做分析。'}
 
 【用户全历史统计】
-总记录${allEntries.length}条，累计学习${Math.round(allTimeMin/60)}小时。各领域分布：${domainSummary}
+总记录${totalRecords}条，累计学习${Math.round(allTimeMin/60)}小时。各领域分布：${domainSummary}
 
 【最近7天每日记录】
 ${dailySummary}
@@ -1330,18 +1417,29 @@ ${JSON.stringify(weekEntries.map(e => ({
   心情: e.mood ? ['','😣','😐','🙂','😊','🤩'][e.mood] : null,
 })).filter(Boolean), null, 2)}
 
-请从以下角度给出分析（语气温暖但直率，像朋友一样说实话，不要只说好听的）：
+请按以下结构分析（共300-500字，用中文）：
 
-1. **本周概览**：用2-3句话概括学习状态，点出最突出的亮点和最明显的缺口
-2. **节奏诊断**：学习时间分布是否合理？有没有偏科或逃避某个领域？周末和周中差异大吗？
-3. **效率观察**：从正确率/完成量等数据看，哪些学习方式效果好，哪些低效？
-4. **建议（3条）**：给出具体可执行的改进建议，每条都要有明确的行动指向（不要"多复习"这种空话，要"每天早8点花20分钟过一遍前天整理的单词本"这种）
-5. **鼓励时刻**：找出一个值得肯定的进步点，哪怕很小也指出来
+1. **本周概览**（2-3句）：先说实话——这周状态到底怎么样。有亮点就说亮点，有问题就直说问题。不要"总体不错但是..."这种废话开头。
+2. **数据诊断**：从时间分配看有没有偏科或失衡？哪块投入和产出不成正比？注意——如果某个领域没有记录，可能是用户这周确实没时间碰它，不要默认等于"逃避"。
+3. **行动建议（3条）**：每条必须具体到"什么时候做什么事""做到什么程度算完成"。禁止"多复习""加强练习"这种空洞表述。${isNewUser ? '考虑到用户刚开始，前2条建议应该聚焦在"建立稳定的记录和学习节奏"上，第3条可以是学习内容方面的。' : ''}
+4. **值得注意的信号**（1个）：不是硬夸，而是从数据中发现一个值得关注的信号——可能是一个微小的进步趋势，也可能是一个需要警惕的苗头。实事求是地说。
 
-用中文回复，分段落，每条建议前用💡 或 ⚠️ 或 🔥 标注类型。总字数300-500字。`;
+每条建议前用 💡 ⚠️ 🔥 标注类型。不要客套开头语（如"亲爱的用户"），直接开始分析。`;
 
     let reply = '';
-    if (s.aiProvider === 'deepseek') {
+
+    // 访客模式：使用内置 Key 直连 DeepSeek（国内不需梯子）
+    if (inGuest) {
+      const resp = await fetch('https://api.deepseek.com/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer sk-128980aeaf56449b8d43afe6b10800b9' },
+        body: JSON.stringify({ model: 'deepseek-chat', messages: [{ role: 'user', content: prompt }], temperature: 0.7 })
+      });
+      const data = await resp.json();
+      reply = data.choices?.[0]?.message?.content || JSON.stringify(data);
+      incrementGuestUsage();
+      updateGuestAiStatus();
+    } else if (s.aiProvider === 'deepseek') {
       const resp = await fetch('https://api.deepseek.com/v1/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${s.aiApiKey}` },
@@ -1454,6 +1552,80 @@ function deleteDomain(id) {
 // ============================================================
 // SETTINGS
 // ============================================================
+
+// ---- 模式管理 ----
+function getMode() { return APP_DATA.settings.mode || 'guest'; }
+
+function switchMode(mode) {
+  APP_DATA.settings.mode = mode;
+  saveData(APP_DATA);
+  applyModeUI();
+  updateAiButton();
+  if (mode === 'personal') {
+    showToast('已切换到个人模式。可配置自己的 API Key 和 Firebase。');
+  } else {
+    showToast('已切换到访客模式。AI 使用公共额度，数据存本机。');
+  }
+}
+
+function getGuestUsage() {
+  const today = new Date().toDateString();
+  const key = 'growth_tracker_guest_ai';
+  let data;
+  try { data = JSON.parse(localStorage.getItem(key) || '{"date":"","count":0}'); } catch(e) { data = {date:'',count:0}; }
+  if (data.date !== today) return 0;
+  return data.count;
+}
+
+function incrementGuestUsage() {
+  const today = new Date().toDateString();
+  localStorage.setItem('growth_tracker_guest_ai', JSON.stringify({ date: today, count: getGuestUsage() + 1 }));
+}
+
+function updateGuestAiStatus() {
+  const remaining = Math.max(0, 20 - getGuestUsage());
+  const el = document.getElementById('guest-ai-remaining');
+  if (el) el.textContent = `今日剩余 ${remaining} 次`;
+  const desc = document.getElementById('guest-ai-desc');
+  if (desc && remaining <= 0) desc.textContent = '今日额度已用完，明天自动恢复。或切换到个人模式。';
+}
+
+function applyModeUI() {
+  const mode = getMode();
+  const isPersonal = mode === 'personal';
+
+  // 模式按钮状态
+  const btnG = document.getElementById('btn-mode-guest');
+  const btnP = document.getElementById('btn-mode-personal');
+  if (btnG) { btnG.className = isPersonal ? 'btn btn-sm' : 'btn btn-primary btn-sm'; btnG.style.borderRadius = '8px 0 0 8px'; }
+  if (btnP) { btnP.className = isPersonal ? 'btn btn-primary btn-sm' : 'btn btn-sm'; btnP.style.borderRadius = '0 8px 8px 0'; }
+
+  // 描述文字
+  const desc = document.getElementById('mode-desc');
+  if (desc) {
+    desc.textContent = isPersonal ? '个人模式：自配 API Key · Firebase 同步 · 无限制' : '访客模式：数据存本机 · AI每天20次 · 无需配置';
+  }
+
+  // 个人模式专属设置
+  const personalSettings = document.getElementById('personal-only-settings');
+  if (personalSettings) personalSettings.style.display = isPersonal ? '' : 'none';
+
+  // 访客模式 AI 状态
+  const guestStatus = document.getElementById('guest-ai-status');
+  if (guestStatus) guestStatus.style.display = isPersonal ? 'none' : '';
+
+  // 访客模式下强制显示 AI 状态
+  if (!isPersonal) updateGuestAiStatus();
+
+  // 设置页底部文字
+  const footer = document.querySelector('#page-settings .card:last-of-type');
+  if (footer) {
+    footer.innerHTML = isPersonal
+      ? '📊 个人模式 · 数据存储在本机 + Firebase 云端同步'
+      : '📊 访客模式 · 数据仅存储在本机浏览器 · 建议定期导出备份';
+  }
+}
+
 function loadSettingsUI() {
   const s = APP_DATA.settings;
   $('setting-goal').value = s.dailyGoalMinutes || 180;
@@ -1466,6 +1638,8 @@ function loadSettingsUI() {
   }
   // 更新离线队列提示
   updateQueueHint();
+  // 应用模式 UI
+  applyModeUI();
 }
 
 function toggleApiKeyRow() {
@@ -1887,6 +2061,8 @@ function initFirebaseIntegration() {
 // ============================================================
 document.addEventListener('DOMContentLoaded', () => {
   populateDomainSelect('record-domain');
+  // 初始化日期选择器为今天
+  $('record-date').value = new Date().toISOString().slice(0, 10);
   renderTodayList();
   updateWelcomeBanner();
   // pre-render history in background
