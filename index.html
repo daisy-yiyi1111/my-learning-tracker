@@ -522,6 +522,10 @@ select {
         <div><div class="setting-label">🤖 公共 AI 分析</div><div class="setting-desc" id="guest-ai-desc">每天20次免费额度，由系统提供</div></div>
         <span style="font-size:0.9rem;color:var(--accent);font-weight:600" id="guest-ai-remaining">今日剩余 20 次</span>
       </div>
+      <div class="setting-row" id="guest-ai-key-row" style="display:none">
+        <div><div class="setting-label">🔑 公共 AI Key</div><div class="setting-desc">访客模式 AI 使用的 Key（仅存本机，不参与同步）。留空则访客模式 AI 不可用</div></div>
+        <input type="text" id="setting-guest-key" placeholder="sk-..." style="width:300px" onchange="saveSettings()">
+      </div>
 
       <div class="setting-row">
         <div><div class="setting-label">JSON 导出备份</div><div class="setting-desc">下载全部数据为 JSON 文件</div></div>
@@ -629,6 +633,7 @@ function initData() {
         dailyGoalMinutes: 180,
         aiProvider: 'none',
         aiApiKey: '',
+        guestAiKey: '',       // 访客模式公共 Key，仅存本机
         mode: 'guest',        // 'guest' | 'personal'
       }
     };
@@ -1428,17 +1433,21 @@ ${JSON.stringify(weekEntries.map(e => ({
 
     let reply = '';
 
-    // 访客模式：使用内置 Key 直连 DeepSeek（国内不需梯子）
+    // 访客模式：使用本机保存的公共 Key 直连 DeepSeek（Key 不进代码、不上云）
     if (inGuest) {
-      const resp = await fetch('https://api.deepseek.com/v1/chat/completions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer sk-128980aeaf56449b8d43afe6b10800b9' },
-        body: JSON.stringify({ model: 'deepseek-chat', messages: [{ role: 'user', content: prompt }], temperature: 0.7 })
-      });
-      const data = await resp.json();
-      reply = data.choices?.[0]?.message?.content || JSON.stringify(data);
-      incrementGuestUsage();
-      updateGuestAiStatus();
+      if (s.guestAiKey) {
+        const resp = await fetch('https://api.deepseek.com/v1/chat/completions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${s.guestAiKey}` },
+          body: JSON.stringify({ model: 'deepseek-chat', messages: [{ role: 'user', content: prompt }], temperature: 0.7 })
+        });
+        const data = await resp.json();
+        reply = data.choices?.[0]?.message?.content || JSON.stringify(data);
+        incrementGuestUsage();
+        updateGuestAiStatus();
+      } else {
+        reply = '⚠️ 未配置公共 AI Key：请到 设置 → 公共 AI Key 填入（仅存本机，不参与同步），或切换到个人模式使用自己的 Key。';
+      }
     } else if (s.aiProvider === 'deepseek') {
       const resp = await fetch('https://api.deepseek.com/v1/chat/completions', {
         method: 'POST',
@@ -1613,6 +1622,8 @@ function applyModeUI() {
   // 访客模式 AI 状态
   const guestStatus = document.getElementById('guest-ai-status');
   if (guestStatus) guestStatus.style.display = isPersonal ? 'none' : '';
+  const guestKeyRow = document.getElementById('guest-ai-key-row');
+  if (guestKeyRow) guestKeyRow.style.display = isPersonal ? 'none' : '';
 
   // 访客模式下强制显示 AI 状态
   if (!isPersonal) updateGuestAiStatus();
@@ -1631,6 +1642,7 @@ function loadSettingsUI() {
   $('setting-goal').value = s.dailyGoalMinutes || 180;
   $('setting-ai-provider').value = s.aiProvider || 'none';
   $('setting-api-key').value = s.aiApiKey || '';
+  $('setting-guest-key').value = s.guestAiKey || '';
   toggleApiKeyRow();
   // 加载已保存的 Firebase 配置
   if (s.firebaseConfig) {
@@ -1652,6 +1664,7 @@ function saveSettings() {
   APP_DATA.settings.dailyGoalMinutes = parseInt($('setting-goal').value) || 180;
   APP_DATA.settings.aiProvider = $('setting-ai-provider').value;
   APP_DATA.settings.aiApiKey = $('setting-api-key').value.trim();
+  APP_DATA.settings.guestAiKey = $('setting-guest-key').value.trim();
   saveData(APP_DATA);
   updateAiButton();
 }
@@ -1917,6 +1930,9 @@ async function connectFirebase() {
           }
 
           APP_DATA = remote.payload;
+          // Key 不参与云端同步：远程数据不含 Key，保留本机已填的
+          if (saved?.settings?.aiApiKey) APP_DATA.settings.aiApiKey = saved.settings.aiApiKey;
+          if (saved?.settings?.guestAiKey) APP_DATA.settings.guestAiKey = saved.settings.guestAiKey;
           localStorage.setItem(STORAGE_KEY, JSON.stringify(APP_DATA));
           APP_DATA.settings._lastSyncedAt = remoteTs;
           renderTodayList(); renderHistory(); renderDomainManager();
@@ -1974,6 +1990,8 @@ async function uploadToFirestore(force) {
   firebaseSyncing = true;
   try {
     const payload = JSON.parse(JSON.stringify(APP_DATA)); // 深拷贝
+    delete payload.settings.aiApiKey;    // API Key 只存本机，不参与云端同步
+    delete payload.settings.guestAiKey;  // 公共 Key 同样不上云
     const ts = Date.now();
     await firebaseDocRef.set({ lastUpdated: ts, payload }, { merge: true });
     APP_DATA.settings._lastSyncedAt = ts;

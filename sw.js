@@ -1,5 +1,5 @@
 // Service Worker for Growth Tracker PWA
-const CACHE_NAME = 'growth-tracker-v3';
+const CACHE_NAME = 'growth-tracker-v4';
 const ASSETS_TO_CACHE = [
   './index.html',
   './manifest.json',

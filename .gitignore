@@ -11,3 +11,6 @@ tools/
 .DS_Store
 Thumbs.db
 Desktop.ini
+
+# Cloudflare worker (abandoned; wrangler cache contains account info)
+workers/
